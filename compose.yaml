@@ -1,0 +1,132 @@
+name: ask-ai
+
+# Services: db -> migrate (one-shot, the only holder of POSTGRES_PASSWORD) -> api and worker (same image, run as a
+# non-root user, connect as the unprivileged rag_app role).
+#
+# api and worker get their settings from the explicit lists below, not from `env_file: .env`: the project .env also
+# holds POSTGRES_PASSWORD (the db and migrate services need it), and an env_file would hand it to the two services that
+# parse hostile files and answer users. A new setting in backend/app/config.py needs a line here to reach them.
+# Empty values count as unset (the app ignores empty settings), so `${X:-}` keeps the app's own default.
+#
+# The worker gets only what app.worker, app.ingest and app.embedding read (database, storage, embeddings, per-file
+# caps): no LLM or rerank keys, no cookie, upload or question settings. The api list adds the rest on top of it.
+x-worker-env: &worker-env
+  DB_HOST: db
+  DB_PORT: "5432"
+  POSTGRES_DB: ${POSTGRES_DB:-chatai}
+  RAG_APP_PASSWORD: ${RAG_APP_PASSWORD:?set RAG_APP_PASSWORD in .env}
+  EMBEDDING_DIM: ${EMBEDDING_DIM:?set EMBEDDING_DIM in .env}
+  STORAGE_DIR: /data/knowledges
+  EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+  EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+  EMBEDDING_BATCH: ${EMBEDDING_BATCH:-}
+  EMBEDDING_DOC_PREFIX: ${EMBEDDING_DOC_PREFIX:-}
+  EMBEDDING_QUERY_PREFIX: ${EMBEDDING_QUERY_PREFIX:-}
+  EMBEDDING_DOC_EXTRA_BODY: ${EMBEDDING_DOC_EXTRA_BODY:-}
+  EMBEDDING_QUERY_EXTRA_BODY: ${EMBEDDING_QUERY_EXTRA_BODY:-}
+  MAX_PDF_PAGES: ${MAX_PDF_PAGES:-}
+  MAX_OCR_PAGES: ${MAX_OCR_PAGES:-}
+
+x-app-env: &app-env
+  <<: *worker-env
+  STATIC_DIR: /app/static
+  COOKIE_SECURE: ${COOKIE_SECURE:-}
+  LLM_PROTOCOL: ${LLM_PROTOCOL:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-}
+  LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-}
+  LLM_EXTRA_BODY: ${LLM_EXTRA_BODY:-}
+  RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+  RERANK_API_KEY: ${RERANK_API_KEY:-}
+  RERANK_MODEL: ${RERANK_MODEL:-}
+  TOP_K: ${TOP_K:-}
+  MIN_SIMILARITY: ${MIN_SIMILARITY:-}
+  MAX_QUESTION_CHARS: ${MAX_QUESTION_CHARS:-}
+  MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-}
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-chatai}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: applies the SQL migrations as the owner role, then exits. The only service with POSTGRES_PASSWORD.
+  # podman-compose 1.6 does not honour `depends_on: condition: service_completed_successfully` (checked: a dependent
+  # of a failing one-shot service starts at the same moment, without waiting). The condition below is kept for
+  # runtimes that do (docker compose); on podman-compose the api and worker wait themselves, with
+  # `python -m app.cli wait-ready`, until the schema is migrated and the startup checks pass.
+  migrate:
+    image: ask-ai-backend:local
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-chatai}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      RAG_APP_PASSWORD: ${RAG_APP_PASSWORD:?set RAG_APP_PASSWORD in .env}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:?set EMBEDDING_DIM in .env}
+    command: python -m app.cli migrate
+    restart: "no"
+
+  api:
+    image: ask-ai-backend:local
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment: *app-env
+    command: sh -c "python -m app.cli wait-ready && exec uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000"
+    restart: on-failure
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      # The corpus is read-only; only uploads/ is writable (the worker reads uploads through its own read-only mount).
+      # Create the directory once with `mkdir -p knowledges/uploads`. It must be writable by the image's user (uid 10001):
+      # verified on the podman machine (applehv, virtiofs); on Linux rootless podman run
+      # `podman unshare chown 10001:10001 knowledges/uploads` (not verified here).
+      - ./knowledges:/data/knowledges:ro
+      - ./knowledges/uploads:/data/knowledges/uploads
+      - ./frontend/dist:/app/static:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  # Ingestion worker: polls ingestion_jobs and parses uploaded files, so it gets the least: read-only corpus and a
+  # memory cap (a hostile PDF or DOCX is killed instead of taking the VM down).
+  worker:
+    image: ask-ai-backend:local
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment: *worker-env
+    command: sh -c "python -m app.cli wait-ready && exec python -m app.worker"
+    restart: on-failure
+    mem_limit: 2g
+    volumes:
+      - ./knowledges:/data/knowledges:ro
+
+volumes:
+  pgdata:

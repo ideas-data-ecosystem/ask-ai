@@ -1,0 +1,34 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect width="36" height="36" fill="#1E1E1E"/>
+<g id="[&#226;&#156;&#133;] Sign In">
+<rect width="1440" height="900" transform="translate(-32 -32)" fill="#121312"/>
+<g id="Group 1171274799">
+<g id="Frame">
+<rect width="36" height="36" rx="18" fill="#1E1E1E"/>
+<g id="Frame_2" clip-path="url(#clip0_0_1)">
+<g id="Clip path group">
+<mask id="mask0_0_1" style="mask-type:luminance" maskUnits="userSpaceOnUse" x="7" y="7" width="22" height="22">
+<g id="clip0_116_153">
+<path id="Vector" d="M29 7H7V29H29V7Z" fill="white"/>
+</g>
+</mask>
+<g mask="url(#mask0_0_1)">
+<g id="Group">
+<path id="Vector_2" d="M18 7C18.3735 12.9136 23.0864 17.6266 29 18C23.0864 18.3735 18.3735 23.0864 18 29C17.6266 23.0864 12.9136 18.3735 7 18C12.9136 17.6266 17.6266 12.9136 18 7Z" fill="url(#paint0_linear_0_1)"/>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+<defs>
+<linearGradient id="paint0_linear_0_1" x1="18" y1="7" x2="18" y2="29" gradientUnits="userSpaceOnUse">
+<stop stop-color="#A886F8"/>
+<stop offset="1" stop-color="#65E2FE"/>
+</linearGradient>
+<clipPath id="clip0_0_1">
+<rect width="22" height="22" fill="white" transform="translate(7 7)"/>
+</clipPath>
+</defs>
+</svg>

@@ -1,0 +1,22 @@
+{"question": "Apa saja jenis hukuman disiplin sedang bagi PNS?", "expected_files": ["PP 94 Tahun 2021"], "page": 7}
+{"question": "Berapa jam kerja instansi pemerintah dalam satu minggu?", "expected_files": ["Perpres 21 Tahun 2023"], "page": 3}
+{"question": "Apa saja nilai dasar ASN BerAKHLAK?", "expected_files": ["SE Menteri PANRB 20 Tahun 2021"], "page": 2}
+{"question": "Apa saja predikat penilaian kinerja PNS?", "expected_files": ["PP 30 Tahun 2019"], "page": 21}
+{"question": "Dalam berapa hari kerja PPK wajib memutuskan keberatan yang diajukan pegawai ASN?", "expected_files": ["PP 79 Tahun 2021"], "page": 5}
+{"question": "Berapa lama hak cuti tahunan PNS?", "expected_files": ["PP 11 Tahun 2017"], "page": 171}
+{"question": "Berapa batas usia pensiun bagi pejabat administrasi?", "expected_files": ["PP 11 Tahun 2017"], "page": 128}
+{"question": "Berapa usia paling rendah dan paling tinggi untuk melamar menjadi PNS?", "expected_files": ["Peraturan BKN 14 Tahun 2018"], "page": 13}
+{"question": "Apa yang dimaksud dengan Pola Karier PNS?", "expected_files": ["PermenPANRB 22 Tahun 2021"], "page": 4}
+{"question": "Berapa kategori dalam kotak manajemen talenta ASN?", "expected_files": ["PermenPANRB 3 Tahun 2020", "PermenPANRB 20 Tahun 2025"], "page": 5}
+{"question": "Pegawai ASN terdiri atas apa saja?", "expected_files": ["UU 20 Tahun 2023"], "page": 6}
+{"question": "Pemutusan hubungan perjanjian kerja PPPK dilakukan dengan hormat karena alasan apa saja?", "expected_files": ["PP 49 Tahun 2018"], "page": 24}
+{"question": "Kapan Pelatihan Dasar CPNS wajib diberikan?", "expected_files": ["Peraturan LAN 1 Tahun 2021"], "page": 6}
+{"question": "Apa yang dimaksud dengan Sistem Merit?", "expected_files": ["PermenPANRB 19 Tahun 2025", "UU 20 Tahun 2023", "PP 11 Tahun 2017"], "page": 3}
+{"question": "Apa yang diatur dalam Pasal 311 PP 11 Tahun 2017?", "expected_files": ["PP 11 Tahun 2017"], "page": 171}
+{"question": "Apa saja jenis pemberhentian PNS menurut peraturan BKN?", "expected_files": ["Peraturan BKN 3 Tahun 2020"], "page": 4}
+{"question": "Siapa presiden pertama Republik Indonesia?", "expect_insufficient": true}
+{"question": "Bagaimana cara membuat nasi goreng yang enak?", "expect_insufficient": true}
+{"question": "Berapa harga Bitcoin hari ini?", "expect_insufficient": true}
+{"question": "Apa ibu kota negara Prancis?", "expect_insufficient": true}
+{"question": "Jelaskan teori relativitas Einstein secara singkat.", "expect_insufficient": true}
+{"question": "Berapa tarif pajak penghasilan badan usaha?", "expect_insufficient": true}

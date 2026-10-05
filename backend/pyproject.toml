@@ -1,0 +1,36 @@
+[project]
+name = "chat-ai-backend"
+version = "0.1.0"
+description = "IDEAS Ask: private AI search over controlled documents (FastAPI + Postgres/pgvector)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "psycopg[binary,pool]>=3.2",
+    "pgvector>=0.3",
+    "pydantic-settings>=2.4",
+    "python-multipart>=0.0.9",
+    # ingestion, retrieval and the LLM clients
+    "httpx>=0.27",
+    "openai>=1.40",
+    "anthropic>=0.34",
+    "pypdfium2>=4.30",
+    "pytesseract>=0.3.10",
+    "python-docx>=1.1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "app.auth.kb_access"]
