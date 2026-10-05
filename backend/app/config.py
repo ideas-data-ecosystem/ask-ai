@@ -61,17 +61,23 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: SecretStr = SecretStr("")
     llm_model: str = ""
-    llm_max_tokens: int = 1024
+    llm_max_tokens: int = 2048  # reasoning models spend completion tokens before they answer
     llm_extra_body: Annotated[dict[str, Any], NoDecode] = {}  # JSON in the env var, passed as the SDK's extra_body
+    # Merged over LLM_EXTRA_BODY (top-level keys replace) for the follow-up question rewrite only, which needs no
+    # reasoning; e.g. NVIDIA Nemotron {"chat_template_kwargs": {"enable_thinking": false}}. Empty: same as answers.
+    llm_rewrite_extra_body: Annotated[dict[str, Any], NoDecode] = {}
 
-    # Optional OpenAI-style /rerank endpoint; unset RERANK_MODEL keeps the RRF order.
+    # Optional OpenAI-style /rerank endpoint; unset RERANK_MODEL keeps the fused order.
     rerank_base_url: str = ""
     rerank_api_key: SecretStr = SecretStr("")
     rerank_model: str = ""
 
     # Retrieval and limits.
     top_k: int = 8
-    min_similarity: float = 0.3  # calibration knob, tune from the eval run
+    # Hybrid ranking: weight of the normalised vector score against the normalised lexical score. Tied to the
+    # embedding model; re-tune with eval/run_eval.py when the model changes.
+    fusion_vector_weight: float = Field(default=0.7, ge=0, le=1)
+    min_similarity: float = 0.15  # calibration knob, tune from the eval run (the defaults match .env.example)
     max_question_chars: int = 1000
     max_upload_mb: int = 50
     max_pdf_pages: int = 1000  # a PDF with more pages fails its job (the corpus' longest has 236)
@@ -83,7 +89,13 @@ class Settings(BaseSettings):
 
     cookie_secure: bool = True  # Secure session cookie; set COOKIE_SECURE=false only for local http development
 
-    @field_validator("embedding_doc_extra_body", "embedding_query_extra_body", "llm_extra_body", mode="before")
+    @field_validator(
+        "embedding_doc_extra_body",
+        "embedding_query_extra_body",
+        "llm_extra_body",
+        "llm_rewrite_extra_body",
+        mode="before",
+    )
     @classmethod
     def _json_object(cls, v: Any) -> Any:
         if isinstance(v, str):

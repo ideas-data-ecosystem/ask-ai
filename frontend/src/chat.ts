@@ -2,7 +2,7 @@
 // The request lives here, not in the view, so an answer still lands when the user opens another page meanwhile.
 import { reactive, watch } from "vue";
 import { api, describeError } from "./api.ts";
-import { HISTORY_MAX, HISTORY_PREFIX, parseHistory, wipeHistory } from "./lib.ts";
+import { contextTurns, HISTORY_MAX, HISTORY_PREFIX, parseHistory, wipeHistory } from "./lib.ts";
 import { session } from "./session.ts";
 import type { AskResponse, HistoryEntry, Turn } from "./types.ts";
 
@@ -76,7 +76,7 @@ export function newThread() {
 export function restore(e: HistoryEntry) {
   resetThread();
   chat.kbId = e.kbId;
-  chat.turns.push({ id: ++seq, kbId: e.kbId, question: e.question, status: "done", answer: e.answer, insufficient: e.insufficient, citations: e.citations, error: "" });
+  chat.turns.push({ id: ++seq, kbId: e.kbId, question: e.question, status: "done", answer: e.answer, insufficient: e.insufficient, citations: e.citations, error: "", restored: true });
 }
 
 export function removeHistory(id: string) {
@@ -90,12 +90,13 @@ export async function ask(): Promise<void> {
   if (!question || !kbId || chat.busy) return;
   const g = gen;
   const uid = session.me?.id; // an answer that arrives after a user switch must not land in the next user's history
-  chat.turns.push({ id: ++seq, kbId, question, status: "pending", answer: "", insufficient: false, citations: [], error: "" });
+  const history = contextTurns(chat.turns, kbId); // earlier turns only, taken before this one joins the thread
+  chat.turns.push({ id: ++seq, kbId, question, status: "pending", answer: "", insufficient: false, citations: [], error: "", restored: false });
   const turn = chat.turns[chat.turns.length - 1]!; // the reactive proxy, so updates re-render
   chat.draft = "";
   chat.busy = true;
   try {
-    const r = await api<AskResponse>(`/kbs/${kbId}/ask`, { method: "POST", json: { question } });
+    const r = await api<AskResponse>(`/kbs/${kbId}/ask`, { method: "POST", json: { question, history } });
     const kbName = session.kbs?.find((k) => k.id === kbId)?.name ?? "";
     const entry: HistoryEntry = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8), kbId, kbName, question, answer: r.answer, insufficient: r.insufficient, citations: r.citations, at: new Date().toISOString() };
     if (session.me?.id === uid) {

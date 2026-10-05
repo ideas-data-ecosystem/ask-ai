@@ -1,4 +1,4 @@
-import type { Citation, Doc, HistoryEntry } from "./types.ts";
+import type { AskTurn, Citation, Doc, HistoryEntry, Turn } from "./types.ts";
 
 export type AnswerPart = { text: string } | { n: number };
 
@@ -34,6 +34,20 @@ export function fileUrl(kbId: string, docId: string, page: number | null = null)
 }
 
 export const MAX_QUESTION_CHARS = 1000; // contract default; the server stays the authority (422)
+
+export const CONTEXT_TURNS = 4; // contract: at most 4 earlier turns per question
+export const CONTEXT_ANSWER_CHARS = 2000; // the server cuts longer answers too; cutting here keeps the body small
+
+// `history` for the next question: the last completed turns of the thread in this KB, oldest first.
+// A refused turn keeps its question (it still names the topic a follow-up refers to) with an empty answer, so the
+// refusal text cannot prime the next answer. Failed and pending turns are left out (a failed question is usually
+// retried verbatim), and so are turns reopened from the history list: reopening starts a fresh context.
+export function contextTurns(turns: Turn[], kbId: string): AskTurn[] {
+  return turns
+    .filter((t) => t.status === "done" && t.kbId === kbId && !t.restored)
+    .slice(-CONTEXT_TURNS)
+    .map((t) => ({ question: t.question.slice(0, MAX_QUESTION_CHARS), answer: t.insufficient ? "" : t.answer.slice(0, CONTEXT_ANSWER_CHARS) }));
+}
 
 export const HISTORY_MAX = 50;
 

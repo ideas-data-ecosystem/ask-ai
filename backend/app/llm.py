@@ -32,6 +32,17 @@ def _anthropic(base_url: str, api_key: str) -> anthropic.Anthropic:
     return anthropic.Anthropic(base_url=base_url, api_key=api_key or "unused", timeout=TIMEOUT_SECONDS, max_retries=1)
 
 
+def _finished(text: str, hit_limit: bool, max_tokens: int) -> str:
+    """A reply cut off at the token limit (reasoning models can spend all of it before answering) or with no text
+    is a failure, not an answer and not a refusal: rag.ask turns it into a 502 instead of "insufficient"."""
+    if hit_limit:
+        what = "a truncated answer" if text.strip() else "no answer"
+        raise LLMError(f"The language model hit the token limit (LLM_MAX_TOKENS={max_tokens}) and returned {what}")
+    if not text.strip():
+        raise LLMError("The language model returned an empty answer")
+    return text
+
+
 def complete(system: str, user: str, settings: Settings | None = None) -> tuple[str, dict[str, int]]:
     """Returns (text, {"prompt_tokens": int, "completion_tokens": int}). Raises LLMError."""
     s = settings or get_settings()
@@ -54,7 +65,7 @@ def complete(system: str, user: str, settings: Settings | None = None) -> tuple[
                 "prompt_tokens": r.usage.prompt_tokens if r.usage else 0,
                 "completion_tokens": r.usage.completion_tokens if r.usage else 0,
             }
-            return choice.message.content or "", usage
+            return _finished(choice.message.content or "", choice.finish_reason == "length", s.llm_max_tokens), usage
         r = _anthropic(s.llm_base_url, key).messages.create(
             model=s.llm_model,
             max_tokens=s.llm_max_tokens,
@@ -65,7 +76,8 @@ def complete(system: str, user: str, settings: Settings | None = None) -> tuple[
         if r.stop_reason == "refusal":
             raise LLMError("The model refused to answer")
         text = "".join(b.text for b in r.content if b.type == "text")
-        return text, {"prompt_tokens": r.usage.input_tokens, "completion_tokens": r.usage.output_tokens}
+        usage = {"prompt_tokens": r.usage.input_tokens, "completion_tokens": r.usage.output_tokens}
+        return _finished(text, r.stop_reason == "max_tokens", s.llm_max_tokens), usage
     except LLMError:
         raise
     except (openai.OpenAIError, anthropic.AnthropicError) as e:

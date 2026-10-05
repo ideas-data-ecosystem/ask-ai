@@ -1,10 +1,11 @@
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from fastapi import HTTPException
 
-from app import embedding, rag
+from app import embedding, llm, rag
 from app.embedding import CANARY_TEXT, EmbeddingError, EmbeddingMismatch, embed
 from app.ingest import reset_stale
 
@@ -33,6 +34,11 @@ def test_lexical_words_drop_stopwords_and_noise():
     ]
     assert rag.lexical_words("Pasal 87 or Pasal 87") == ["pasal", "87"]  # deduplicated, "or" is reserved syntax
     assert rag.lexical_words("apa yang di ke? a b") == []  # nothing left: the lexical leg is skipped
+    # a stopword behind a -kah/-lah/-pun particle goes too ("adakah" stems to "ada", in a third of the corpus) ...
+    assert rag.lexical_words("adakah cara untuk naik resign ?") == ["cara", "naik", "resign"]
+    assert rag.lexical_words("Bagaimanakah dan siapapun bisalah?") == []
+    # ... but a word that merely ends in those letters stays whole
+    assert rag.lexical_words("masalah sekolah nikah") == ["masalah", "sekolah", "nikah"]
 
 
 def test_finalize_keeps_only_valid_markers():
@@ -191,6 +197,70 @@ def test_llm_failure_is_502_and_logged(monkeypatch, pool, settings, owner_conn, 
     assert "refused" in log["error"] and log["answer"] is None
 
 
+def openai_reply(content, finish_reason):
+    message = SimpleNamespace(content=content, refusal=None)
+    return SimpleNamespace(
+        choices=[SimpleNamespace(finish_reason=finish_reason, message=message)],
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=2048),
+    )
+
+
+def anthropic_reply(text, stop_reason):
+    blocks = [SimpleNamespace(type="thinking", thinking="...")] + (
+        [SimpleNamespace(type="text", text=text)] if text else []
+    )
+    return SimpleNamespace(
+        content=blocks, stop_reason=stop_reason, usage=SimpleNamespace(input_tokens=100, output_tokens=2048)
+    )
+
+
+def fake_llm_client(monkeypatch, protocol, reply):
+    """Replace the SDK client of one protocol; complete() itself stays real."""
+    create = lambda **kw: reply
+    if protocol == "openai":
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        monkeypatch.setattr(llm, "_openai", lambda base_url, key: client)
+    else:
+        monkeypatch.setattr(
+            llm, "_anthropic", lambda base_url, key: SimpleNamespace(messages=SimpleNamespace(create=create))
+        )
+
+
+@pytest.mark.parametrize(
+    ("protocol", "reply", "message"),
+    [
+        ("openai", openai_reply(None, "length"), r"token limit \(LLM_MAX_TOKENS=2048\) and returned no answer"),
+        ("openai", openai_reply("Usia pensiun 58 tahun [1", "length"), "token limit .* returned a truncated answer"),
+        ("openai", openai_reply("  ", "stop"), "returned an empty answer"),
+        ("anthropic", anthropic_reply("", "max_tokens"), "token limit .* returned no answer"),
+        ("anthropic", anthropic_reply("Usia pensiun [1", "max_tokens"), "token limit .* returned a truncated answer"),
+    ],
+)
+def test_a_reply_cut_at_the_token_limit_or_empty_is_an_llm_error(monkeypatch, settings, protocol, reply, message):
+    fake_llm_client(monkeypatch, protocol, reply)
+    with pytest.raises(llm.LLMError, match=message):
+        llm.complete("system", "user", settings=rag_settings(settings, llm_protocol=protocol, llm_max_tokens=2048))
+
+
+def test_a_finished_reply_is_returned_with_its_usage(monkeypatch, settings):
+    fake_llm_client(monkeypatch, "openai", openai_reply("Jawaban [1].", "stop"))
+    s = rag_settings(settings, llm_protocol="openai")
+    assert llm.complete("s", "u", settings=s) == ("Jawaban [1].", {"prompt_tokens": 100, "completion_tokens": 2048})
+    fake_llm_client(monkeypatch, "anthropic", anthropic_reply("Jawaban [1].", "end_turn"))
+    s = rag_settings(settings, llm_protocol="anthropic")
+    assert llm.complete("s", "u", settings=s)[0] == "Jawaban [1]."  # the thinking block is not part of the answer
+
+
+def test_a_reply_cut_at_the_token_limit_is_a_502_not_insufficient(monkeypatch, pool, settings, owner_conn, indexed):
+    install_embed(monkeypatch)
+    fake_llm_client(monkeypatch, "openai", openai_reply(None, "length"))
+    with pytest.raises(HTTPException) as e:
+        ask(pool, rag_settings(settings, llm_protocol="openai"), indexed, "Apa itu pemberhentian?")
+    assert e.value.status_code == 502
+    log = last_log(owner_conn, indexed)
+    assert "token limit" in log["error"] and log["insufficient"] is False and log["answer"] is None
+
+
 def test_never_indexed_kb_answers_insufficient_without_embedding(monkeypatch, pool, settings, make_kb):
     emb = install_embed(monkeypatch)
     llm_ = install_llm(monkeypatch)
@@ -209,58 +279,64 @@ def test_kb_indexed_with_another_model_is_409_reindex_required(monkeypatch, pool
     assert last_log(owner_conn, indexed)["error"].startswith("Reindex required")
 
 
-def test_fusion_surfaces_a_lexical_only_hit_next_to_the_vector_hit(pool, make_kb):
+def insert_chunks(pool, kb, chunks):
+    """chunks: (content, embedding) pairs added to the KB's document."""
     from pgvector import Vector
 
     from app.db import kb_scope
 
-    kb = make_kb()
-    e1, e2 = [1.0] + [0.0] * (DIM - 1), [0.0, 1.0] + [0.0] * (DIM - 2)
-    with pool.connection() as conn:
-        with kb_scope(conn, kb.id):
-            conn.cursor().executemany(
-                "INSERT INTO document_chunks (kb_id, document_id, chunk_index, content, embedding) VALUES (%s, %s, %s, %s, %s)",
-                [
-                    (kb.id, kb.doc_id, 0, "isi umum tentang kepegawaian", Vector(e1)),
-                    (kb.id, kb.doc_id, 1, "ketentuan tentang zebra khusus", Vector(e2)),
-                ],
-            )
-        rows = rag.retrieve(conn, kb.id, e1, rag.lexical_words("Apa itu zebra?"), 8)
-    by_content = {r["content"]: r for r in rows}
-    vec_hit, lexical_hit = by_content["isi umum tentang kepegawaian"], by_content["ketentuan tentang zebra khusus"]
-    assert vec_hit["vec_sim"] == pytest.approx(1.0) and vec_hit["fts_rank"] is None
-    assert lexical_hit["fts_rank"] is not None and lexical_hit["vec_sim"] == pytest.approx(0.0)
-    # RRF k=60: the vector leg ranks the chunks [1, 2], the lexical leg only the zebra chunk (rank 1)
-    assert vec_hit["fused"] == pytest.approx(1 / 61) and lexical_hit["fused"] == pytest.approx(1 / 62 + 1 / 61)
-    assert [r["content"] for r in rows] == ["ketentuan tentang zebra khusus", "isi umum tentang kepegawaian"]
-
-
-def test_gate_uses_the_returned_chunk_not_the_best_chunk_of_the_kb(monkeypatch, pool, settings, make_kb):
-    from pgvector import Vector
-
-    from app.db import kb_scope
-
-    kb = make_kb()
-    e1, e2 = [1.0] + [0.0] * (DIM - 1), [0.0, 1.0] + [0.0] * (DIM - 2)
     with pool.connection() as conn, kb_scope(conn, kb.id):
         conn.cursor().executemany(
             "INSERT INTO document_chunks (kb_id, document_id, chunk_index, content, embedding) VALUES (%s, %s, %s, %s, %s)",
-            [
-                (kb.id, kb.doc_id, 0, "isi umum tentang kepegawaian", Vector(e1)),  # similarity 1.0 to the question
-                (
-                    kb.id,
-                    kb.doc_id,
-                    1,
-                    "ketentuan tentang zebra khusus",
-                    Vector(e2),
-                ),  # similarity 0.0, but a lexical hit
-            ],
+            [(kb.id, kb.doc_id, i, content, Vector(vec)) for i, (content, vec) in enumerate(chunks)],
         )
+
+
+E1, E2 = [1.0] + [0.0] * (DIM - 1), [0.0, 1.0] + [0.0] * (DIM - 2)
+
+
+def test_fusion_weighs_normalised_vector_and_lexical_scores(pool, make_kb):
+    kb = make_kb()
+    insert_chunks(pool, kb, [("isi umum tentang kepegawaian", E1), ("ketentuan tentang zebra khusus", E2)])
+
+    def fused(weight):
+        with pool.connection() as conn:
+            return {r["content"]: r for r in rag.retrieve(conn, kb.id, [E1], [["zebra"]], 8, weight)}
+
+    rows = fused(0.8)
+    vec_hit, lexical_hit = rows["isi umum tentang kepegawaian"], rows["ketentuan tentang zebra khusus"]
+    assert vec_hit["vec_sim"] == pytest.approx(1.0) and vec_hit["fts_rank"] is None
+    assert lexical_hit["fts_rank"] is not None and lexical_hit["vec_sim"] == pytest.approx(0.0)
+    # min-max normalised cosine is 1 and 0, lexical score over the best one is 0 and 1: fused = w and 1 - w
+    assert vec_hit["fused"] == pytest.approx(0.8) and lexical_hit["fused"] == pytest.approx(0.2)
+    with pool.connection() as conn:
+        assert [r["content"] for r in rag.retrieve(conn, kb.id, [E1], [["zebra"]], 8, 0.3)] == [
+            "ketentuan tentang zebra khusus",
+            "isi umum tentang kepegawaian",
+        ]
+
+
+def test_words_in_most_chunks_are_dropped_from_the_lexical_query_but_numbers_are_kept(pool, make_kb):
+    kb = make_kb()
+    insert_chunks(pool, kb, [(f"ketentuan umum nomor {i}", E1) for i in range(29)] + [("zebra 87 umum", E2)])
+    with pool.connection() as conn:
+        rows = rag.retrieve(conn, kb.id, [E1], [["umum", "zebra"]], 40, 0.5)
+    # "umum" is in all 30 chunks (more than 0.2 x 100, no information), so only "zebra" decides lexical matches
+    assert {r["content"] for r in rows if r["fts_rank"] is not None} == {"zebra 87 umum"}
+    with pool.connection() as conn:
+        rows = rag.retrieve(conn, kb.id, [E1], [["87"]], 40, 0.5)
+    assert [r["content"] for r in rows if r["fts_rank"] is not None] == ["zebra 87 umum"]
+
+
+def test_gate_uses_the_returned_chunk_not_the_best_chunk_of_the_kb(monkeypatch, pool, settings, make_kb):
+    kb = make_kb()
+    # similarity 1.0 to the question, and similarity 0.0 but a lexical hit
+    insert_chunks(pool, kb, [("isi umum tentang kepegawaian", E1), ("ketentuan tentang zebra khusus", E2)])
     mark_indexed(pool, kb)
-    install_embed(monkeypatch, query_vec=e1)
+    install_embed(monkeypatch, query_vec=E1)
     llm_ = install_llm(monkeypatch)
-    # top_k=1: fusion keeps only the zebra chunk (vector rank 2 + lexical rank 1 beats vector rank 1 alone)
-    out = ask(pool, rag_settings(settings, top_k=1), kb, "Apa itu zebra?")
+    # top_k=1 and a lexical-heavy weight: fusion keeps only the zebra chunk
+    out = ask(pool, rag_settings(settings, top_k=1, fusion_vector_weight=0.3), kb, "Apa itu zebra?")
     assert out["insufficient"] is True and llm_.calls == []  # the 1.0 chunk was dropped, so it cannot open the gate
 
 
@@ -683,34 +759,92 @@ def test_eval_runs_against_fakes_and_reports(monkeypatch, pool, settings, capsys
     install_embed(monkeypatch)
     install_llm(monkeypatch, "Jawaban [1].")
     s = rag_settings(settings)
-    kb = make_kb(chunks=3)  # every chunk is in a.pdf
+    kb = make_kb(chunks=3)  # every chunk is "Pasal 87 mengatur pemberhentian" in a.pdf
     mark_indexed(pool, kb)
     golden = [
-        {"question": "Apa isi Pasal 87?", "expected_files": ["a.pdf"]},
-        {"question": "Apa isi Pasal 87?", "expected_files": ["b.pdf"]},  # retrieved, but not from an expected file
-        {"question": "Resep nasi goreng?", "expect_insufficient": True},
+        {
+            "intent": "x",
+            "question": "Apa isi Pasal 87?",
+            "expected": [{"file": "a.pdf", "text": "MENGATUR  pemberhentian"}],
+        },
+        {"intent": "x", "question": "Apa isi Pasal 87?", "expected": [{"file": "b.pdf"}]},  # no labelled chunk
+        {"intent": "out", "question": "Resep nasi goreng?", "expect_insufficient": True},
     ]
     found = {"id": kb.id, "name": "k", "embedding_fingerprint": s.embedding_fingerprint, "embedding_query_canary": None}
-    report = run_eval.evaluate(pool, s, found, golden)
-    assert report["hit_rate"] == 0.5 and report["answered_rate"] == 1.0
-    # the fake embeds every text identically, so the out-of-scope question is not separable here;
-    # what matters is that the run completes and reports the numbers
-    assert report["outscope_insufficient_rate"] in (0.0, 1.0) and report["sim_inscope"][0] == pytest.approx(1.0)
-    no_llm = run_eval.evaluate(pool, s, found, golden, use_llm=False)
-    assert no_llm["answered_rate"] == 1.0
+    report = run_eval.evaluate(pool, s, found, golden, repeat=2)
+    assert report["hit_rate"] == 0.5 and report["mrr"] == 0.5 and report["answered_rate"] == 1.0
+    assert report["cites_label"] == 2 and report["flip_rate"] == 0.0 and report["intents_consistent"] == 1
+    # the fake embeds every text identically, so the out-of-scope question is not separable here
+    assert report["outscope_insufficient_rate"] == 0.0 and report["sim_inscope"][0] == pytest.approx(1.0)
+    assert run_eval.evaluate(pool, s, found, golden, use_llm=False)["answered_rate"] == 1.0
+
+    # runs of one question that end differently count as a flip, and the intent is no longer consistent
+    replies = iter(["Jawaban [1].", "INSUFFICIENT_CONTEXT"] * 3)
+    monkeypatch.setattr(llm, "complete", lambda system, user, settings=None: (next(replies), {}))
+    flipping = run_eval.evaluate(pool, s, found, golden, repeat=2)
+    assert flipping["flip_rate"] == 1.0 and flipping["intents_consistent"] == 0 and flipping["wrongly_refused"] == 2
+
+    # an LLM failure counts as neither an answer nor a refusal
+    install_llm(monkeypatch).error = "The language model hit the token limit"
+    failed = run_eval.evaluate(pool, s, found, golden)
+    assert failed["answered_rate"] == 0.0 and failed["outscope_insufficient_rate"] == 0.0
+    assert failed["wrongly_refused"] == 0 and len(failed["errors"]) == 3
+
+    # a 429 from a free API tier is waited out and retried, not counted as a failure
+    rate_limited = Exception("Too Many Requests")
+    rate_limited.status_code = 429
+    calls = []
+
+    def complete(system, user, settings=None):
+        calls.append(user)
+        if len(calls) == 1:
+            raise llm.LLMError("The language model request failed (HTTP 429)") from rate_limited
+        return "Jawaban [1].", {"prompt_tokens": 1, "completion_tokens": 1}
+
+    monkeypatch.setattr(llm, "complete", complete)
+    monkeypatch.setattr(run_eval.time, "sleep", lambda seconds: None)
+    r = run_eval.run_question(pool, s, found, golden[0], use_llm=True)
+    assert r["runs"][0]["outcome"] == "answered" and len(calls) == 2
+
     run_eval.print_report(report, s, verbose=True)
     out = capsys.readouterr().out
-    assert "top-8 hit rate" in out and "MISS" in out
+    assert "label hit@8" in out and "MISS" in out and "runs=AA" in out
+
+
+def test_eval_labels_match_pasal_ranges_but_not_penjelasan():
+    from eval.run_eval import matches
+
+    def r(heading, filename="PP 11 Tahun 2017 - Manajemen PNS.pdf", content="isi"):
+        return {"heading": heading, "filename": filename, "content": content}
+
+    label = {"file": "PP 11 Tahun 2017", "pasal": 240}
+    assert matches(r("Pasal 239–240"), label) and matches(r("Pasal 240"), label)
+    assert not matches(r("Penjelasan Pasal 240"), label) and not matches(r("Pasal 24"), label)
+    assert not matches(r("Pasal 240", filename="PP 17 Tahun 2020.pdf"), label) and not matches(r(None), label)
+    assert matches(r(None, content="Sistem  Merit\nadalah kebijakan"), {"text": "sistem merit adalah"})
 
 
 def test_golden_set_is_well_formed():
+    from collections import Counter
+
     from eval import run_eval
 
     golden = run_eval.load_golden(run_eval.GOLDEN)
-    inscope = [g for g in golden if g.get("expected_files")]
+    inscope = [g for g in golden if g.get("expected")]
     outscope = [g for g in golden if g.get("expect_insufficient")]
-    assert len(inscope) >= 15 and len(outscope) >= 5 and len(inscope) + len(outscope) == len(golden)
-    assert all(isinstance(f, str) and f for g in inscope for f in g["expected_files"])
+    assert len(inscope) + len(outscope) == len(golden) and len(outscope) >= 10
+    intents = Counter(g["intent"] for g in inscope)
+    assert len(intents) >= 15 and min(intents.values()) >= 3  # every intent asked at least three ways
+    assert all(lb and set(lb) <= {"file", "pasal", "text"} for g in inscope for lb in g["expected"])
+    # follow-ups carry what the browser sends: at most 4 earlier turns, each a question and an answer ("" if refused)
+    followups = [g for g in golden if "history" in g]
+    assert len({g["intent"] for g in followups if g.get("expected")}) >= 3
+    assert all(1 <= len(g["history"]) <= 4 for g in followups)
+    assert all(
+        set(t) == {"question", "answer"} and all(isinstance(v, str) for v in t.values())
+        for g in followups
+        for t in g["history"]
+    )
 
 
 def test_eval_without_endpoint_config_fails_clearly(monkeypatch, settings):

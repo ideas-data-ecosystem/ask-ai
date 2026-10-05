@@ -1,6 +1,7 @@
 // Run with `npm run check` (Node strips types). No test framework on purpose.
 import { ApiError, describeError, parseDetail } from "./api.ts";
-import { docTitle, fileUrl, HISTORY_MAX, initial, pageRange, parseHistory, splitAnswer, suggestionGroups, wipeHistory } from "./lib.ts";
+import { CONTEXT_ANSWER_CHARS, CONTEXT_TURNS, contextTurns, docTitle, fileUrl, HISTORY_MAX, initial, MAX_QUESTION_CHARS, pageRange, parseHistory, splitAnswer, suggestionGroups, wipeHistory } from "./lib.ts";
+import type { Turn } from "./types.ts";
 
 function eq(actual: unknown, expected: unknown, label: string) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -62,5 +63,19 @@ eq([...store.keys()], ["chat-ai:history:a", "other"], "login: keeps the current 
 wipeHistory(() => fake);
 eq([...store.keys()], ["other"], "logout: removes all history");
 wipeHistory(() => { throw new Error("SecurityError"); }); // blocked storage must not throw
+
+const turn = (question: string, over: Partial<Turn> = {}): Turn => ({ id: 0, kbId: "k", question, status: "done", answer: `a ${question}`, insufficient: false, citations: [], error: "", restored: false, ...over });
+eq(contextTurns([], "k"), [], "no earlier turns: empty history");
+eq(
+  contextTurns([turn("q1"), turn("q2", { insufficient: true, answer: "Tidak ada informasi yang cukup di knowledge base ini" }), turn("q3", { status: "error", answer: "" }), turn("q4", { status: "pending" })], "k"),
+  [{ question: "q1", answer: "a q1" }, { question: "q2", answer: "" }],
+  "oldest first; a refused turn keeps its question with an empty answer; failed and pending turns are left out",
+);
+eq(contextTurns(["q1", "q2", "q3", "q4", "q5", "q6"].map((q) => turn(q)), "k").map((t) => t.question), ["q3", "q4", "q5", "q6"], "only the last 4");
+eq(CONTEXT_TURNS, 4, "contract cap");
+eq(contextTurns([turn("old", { restored: true }), turn("new")], "k"), [{ question: "new", answer: "a new" }], "a reopened history entry is not context");
+eq(contextTurns([turn("other kb", { kbId: "x" }), turn("this kb")], "k").map((t) => t.question), ["this kb"], "never across KBs");
+const [cut] = contextTurns([turn("q".repeat(MAX_QUESTION_CHARS + 9), { answer: "b".repeat(CONTEXT_ANSWER_CHARS + 9) })], "k");
+eq([cut?.question.length, cut?.answer.length], [MAX_QUESTION_CHARS, CONTEXT_ANSWER_CHARS], "fields cut to the contract caps");
 
 console.log("lib checks passed");

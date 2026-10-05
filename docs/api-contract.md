@@ -104,7 +104,10 @@ interface QueryLog {
   retrieved: { chunk_id: number; document_id: string; vec_sim: number | null; fts_rank: number | null; fused: number }[];
   model: string | null; latency_ms: number | null;
   prompt_tokens: number | null; completion_tokens: number | null;
-  error: string | null; created_at: string;
+  error: string | null;
+  rewritten_question: string | null;  // the standalone question searched next to `question`; null without history or when the rewrite failed
+  history_turns: number;              // earlier turns the request carried (0: single-turn)
+  created_at: string;
 }
 ```
 
@@ -229,7 +232,17 @@ editor+. Enqueues one job for every document of the KB that has no queued or run
 ## Ask (phase 3)
 
 ### `POST /api/kbs/{kb_id}/ask`
-viewer+. Body: `{ "question": string }`, trimmed length 1 to `MAX_QUESTION_CHARS` (default 1000). Single turn, no streaming.
+viewer+. Body: `{ "question": string, "history"?: { "question": string, "answer": string }[] | null }`. `question` is trimmed, length 1 to `MAX_QUESTION_CHARS` (default 1000). No streaming.
+
+`history` (optional) holds earlier turns of the conversation, the most recent last, so a follow-up such as "berapa lama?" can be answered:
+
+- At most 4 turns. Each turn has exactly the keys `question` and `answer`, both strings. More turns, another key, a missing key, a non-string, or a turn whose `question` is empty after trimming is a `422`. Unknown top-level keys are still ignored.
+- After trimming, a turn's `question` is cut to `MAX_QUESTION_CHARS` and its `answer` to 2,000 characters; longer values are cut, not refused, because an answer from this API can be longer.
+- For a turn that came back `insufficient`, send `""` as its `answer`.
+- Absent, `null` or `[]` is a single-turn question, handled exactly as before.
+- A full history at the caps (4 × (1,000 + 2,000) characters plus a 1,000-character question, about 13,000 characters) is at most about 39 KiB of UTF-8 even in a 3-byte script, under the 64 KiB body limit.
+- With history, the server first rewrites the question into a standalone one (one extra LLM call, `LLM_REWRITE_EXTRA_BODY`), searches with both the question and the rewrite, and shows the turns to the model in a separate block marked as untrusted user history that is not a source. Citations still refer only to the numbered sources returned in `citations`; markers inside history answers are removed before the model sees them. If the rewrite call fails or returns nothing, the question is searched alone and the request still succeeds.
+- The SPA sends the last (at most 4) completed turns of the current thread in the same KB: insufficient turns with an empty `answer`, failed turns and turns reopened from the history list not at all. Switching KB, starting a new thread or reopening a history entry starts with no history.
 
 `200`:
 
@@ -257,7 +270,7 @@ viewer+. Body: `{ "question": string }`, trimmed length 1 to `MAX_QUESTION_CHARS
 - `409` the KB was indexed with a different embedding setup (model, prefixes or extra bodies) than the configured one, or its index is incomplete (`detail` starts with `Reindex required`), or the KB is archived.
 - `502` the embedding or LLM call failed or the model refused; the attempt is still written to the query log with `error`.
 - `429` the caller already has 2 questions in flight (per user, per server process): wait for one to finish. Not written to the query log.
-- `422` empty or too long question. `401`, `403`, `404`.
+- `422` empty or too long question, or a malformed `history`. `401`, `403`, `404`.
 
 ## Logs (phase 3 for queries, phase 2 for jobs)
 
@@ -267,7 +280,7 @@ Both are editor+ (admins included; viewers get `403`). Newest first.
 Query: `status?` (`queued|running|done|failed`), `document_id?`, `limit?` (1-500, default 100), `offset?` (default 0). `200` body `Job[]` ordered by `id` descending. `401`, `403`, `404`, `422`.
 
 ### `GET /api/kbs/{kb_id}/queries` (phase 3)
-Query: `insufficient?` (boolean), `limit?` (1-500, default 100), `offset?` (default 0). `200` body `QueryLog[]` ordered by `id` descending. `401`, `403`, `404`, `422`.
+Query: `insufficient?` (boolean), `limit?` (1-500, default 100), `offset?` (default 0). `200` body `QueryLog[]` ordered by `id` descending. `question` is the question as asked; for a follow-up, `rewritten_question` is the standalone question searched next to it and `history_turns` the number of turns sent (the turns themselves are not stored). `401`, `403`, `404`, `422`.
 
 ## Everything else
 

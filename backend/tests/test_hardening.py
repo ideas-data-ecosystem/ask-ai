@@ -339,12 +339,12 @@ def test_startup_check_rejects_an_app_role_that_belongs_to_the_table_owner(pool,
 
 
 def test_startup_check_refuses_a_schema_behind_the_code(pool, owner_conn):
-    owner_conn.execute("ALTER TABLE knowledge_bases RENAME COLUMN embedding_query_canary TO old_name")
+    owner_conn.execute("ALTER TABLE query_logs RENAME COLUMN rewritten_question TO old_name")  # newest migration
     try:
         with pool.connection() as conn, pytest.raises(StartupCheckError, match="app.cli migrate"):
             check_db(conn, DIM)
     finally:
-        owner_conn.execute("ALTER TABLE knowledge_bases RENAME COLUMN old_name TO embedding_query_canary")
+        owner_conn.execute("ALTER TABLE query_logs RENAME COLUMN old_name TO rewritten_question")
     healthy(pool)
 
 
@@ -381,6 +381,19 @@ def test_cookie_is_secure_by_default_and_the_example_env_only_offers_the_local_h
     example = (Path(__file__).resolve().parents[2] / ".env.example").read_text().splitlines()
     assert "COOKIE_SECURE=false" not in example  # copying the example to .env must not turn Secure off
     assert "#COOKIE_SECURE=false" in example  # the local-http opt-out stays one uncomment away
+
+
+def test_code_defaults_match_the_example_env():
+    """A .env without a key runs the code default (compose passes an empty value, which counts as unset), so the two
+    must agree: MIN_SIMILARITY 0.3 in code refused in-scope questions the example's 0.15 answers."""
+    example = (Path(__file__).resolve().parents[2] / ".env.example").read_text().splitlines()
+    checked = set()
+    for key, _, value in (line.partition("=") for line in example if "=" in line and not line.startswith("#")):
+        field = Settings.model_fields.get(key.lower())
+        if field is not None and isinstance(field.default, int | float) and not isinstance(field.default, bool):
+            assert type(field.default)(value) == field.default, key
+            checked.add(key)
+    assert {"MIN_SIMILARITY", "LLM_MAX_TOKENS", "TOP_K", "FUSION_VECTOR_WEIGHT", "EMBEDDING_BATCH"} <= checked
 
 
 # --- S9: provider detail stays in the server log ---------------------------------------------------------------

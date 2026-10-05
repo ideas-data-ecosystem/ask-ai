@@ -76,6 +76,12 @@ export interface Citation {
   snippet: string;
 }
 
+// One earlier turn sent with a question (`history` of POST /ask): at most 4, the most recent last.
+export interface AskTurn {
+  question: string;
+  answer: string;
+}
+
 export interface AskResponse {
   answer: string;
   insufficient: boolean;
@@ -96,6 +102,8 @@ export interface QueryLog {
   prompt_tokens: number | null;
   completion_tokens: number | null;
   error: string | null;
+  rewritten_question: string | null; // the standalone question searched next to `question`; null without history
+  history_turns: number; // earlier turns the question carried (0: single-turn)
   created_at: string;
 }
 
@@ -111,7 +119,8 @@ export interface KbStats {
   last_indexed_at: string | null;
 }
 
-// One question in the Ask thread. `pending` while /ask is in flight.
+// One question in the Ask thread. `pending` while /ask is in flight. `restored`: reopened from the history list,
+// shown but not sent as context.
 export interface Turn {
   id: number;
   kbId: string;
@@ -121,6 +130,7 @@ export interface Turn {
   insufficient: boolean;
   citations: Citation[];
   error: string;
+  restored: boolean;
 }
 
 // A past question kept in sessionStorage (per user, per tab) so it can be reopened without asking again.

@@ -92,20 +92,44 @@ uvx ruff check . && uvx ruff format --check .
 cd ../frontend && npm run check
 ```
 
-## Evaluating retrieval
+## Evaluating retrieval and answers
 
-`backend/eval/golden.jsonl` holds in-scope questions with their expected source documents and out-of-scope questions that
-must be declared insufficient. The run uses the real embedding and LLM endpoints from `.env` against an indexed KB:
+`backend/eval/golden.jsonl` is the golden set, one JSON object per line, grouped by intent (each intent asked at least
+three ways):
 
-```sh
-cd backend && uv run python -m eval.run_eval --kb "Regulasi ASN" -v
+```json
+{"intent": "cuti-melahirkan", "question": "Berapa lama cuti melahirkan bagi PNS?", "expected": [{"file": "PP 11 Tahun 2017", "pasal": 325}]}
+{"intent": "followup-lama-cuti-melahirkan", "history": [{"question": "apakah PNS dapat cuti melahirkan?", "answer": "Ya. ... [1]."}], "question": "lamanya berapa bulan?", "expected": [{"file": "PP 11 Tahun 2017", "pasal": 325}]}
+{"intent": "out-of-scope", "question": "Berapa tarif PPN saat ini?", "expect_insufficient": true}
 ```
 
-It reports the top-k hit rate, the answered and insufficient rates, and the best-similarity range of in-scope versus
-out-of-scope questions. Set `MIN_SIMILARITY` in `.env` from that range (the evidence gate: below it the app answers
-"not enough information" without calling the LLM), then recreate the api (`podman compose up -d`). Optional flags:
-`--no-llm` (retrieval and gate only) and `--other-kb "<name>"` (in-scope questions asked in an unrelated KB must be
-insufficient).
+A label (`file`, `pasal`, `text`, any subset) names the chunks that hold the answer: the filename starts with `file`,
+the chunk heading `Pasal N` or `Pasal N–M` covers `pasal` (Penjelasan chunks do not count), and the content contains
+`text` (case and whitespace insensitive). Labels survive a reindex; chunk ids do not. `history` (optional, at most 4
+turns, `""` for a refused answer) makes the line a follow-up: it is sent the way the browser sends it, so the question
+is rewritten into a standalone one and retrieval runs on both.
+
+The run uses the real embedding and LLM endpoints from `.env` against an indexed KB and writes no query logs:
+
+```sh
+cd backend
+uv run python -m eval.run_eval --kb regulasi-asn -v --no-llm            # retrieval and gate only (follow-ups still call the rewrite)
+uv run python -m eval.run_eval --kb regulasi-asn -v --repeat 3 --out ../.run/eval/answers.json \
+  --llm-extra-body '{"chat_template_kwargs":{"enable_thinking":true,"low_effort":true}}' \
+  --rewrite-extra-body '{"chat_template_kwargs":{"enable_thinking":false},"temperature":0}'
+```
+
+It reports label hit@k and MRR, the answered rate of in-scope runs, the insufficient rate of out-of-scope runs, wrongly
+refused runs, answers citing a labelled chunk, the flip rate (questions whose `--repeat` runs ended differently),
+intents answered in every run, LLM errors and latency, the follow-up answered rate and rewrite fallbacks, and the
+best-similarity range of in-scope versus out-of-scope questions. An LLM error (for example the token limit) counts as
+neither an answer nor a refusal; HTTP 429 from a free API tier is waited out.
+
+Flags: `--kb` (name or slug), `--golden <file>`, `--no-llm`, `--repeat N`, `--other-kb "<name>"` (in-scope questions
+asked in an unrelated KB must be insufficient), `--out <file.json>` (full report), `-v` (one line per question, with
+each follow-up's rewrite), and per-run overrides that leave `.env` alone: `--llm-extra-body`, `--rewrite-extra-body`,
+`--min-similarity`, `--fusion-weight`. Set `MIN_SIMILARITY` and `FUSION_VECTOR_WEIGHT` in `.env` from the results,
+then restart the api.
 
 ## Embedding notes
 

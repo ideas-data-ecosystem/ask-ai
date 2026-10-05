@@ -12,29 +12,39 @@ ORTHOGONAL_VEC = [1.0, -1.0] * (DIM // 2)  # cosine 0 against the all-equal vect
 MODEL = "fake-embed"
 
 
-def install_embed(monkeypatch, query_vec=None, canary=None):
+def install_embed(monkeypatch, query_vec=None, canary=None, by_text=None):
     """Replace the HTTP call of app.embedding; embed() itself (batching, canary guard, dimension check) stays real.
 
-    The returned state controls the vectors: `query_vec` for every text, `canary` for the canary sentence.
+    The returned state controls the vectors: `canary` for the canary sentence, `by_text[text]` for a listed text,
+    `query_vec` for every other text.
     """
-    state = SimpleNamespace(query_vec=query_vec or [1.0] * DIM, canary=canary or CANARY_VEC, calls=[])
+    state = SimpleNamespace(
+        query_vec=query_vec or [1.0] * DIM, canary=canary or CANARY_VEC, by_text=by_text or {}, calls=[]
+    )
+
+    def vector(text):
+        return state.canary if text == embedding.CANARY_TEXT else state.by_text.get(text, state.query_vec)
 
     def fake_call(inputs, mode, settings):
         state.calls.append((list(inputs), mode))
-        return [list(state.canary if t == embedding.CANARY_TEXT else state.query_vec) for t in inputs], len(inputs)
+        return [list(vector(t)) for t in inputs], len(inputs)
 
     monkeypatch.setattr(embedding, "_call", fake_call)
     return state
 
 
 def install_llm(monkeypatch, reply="Jawaban [1]."):
-    state = SimpleNamespace(reply=reply, error=None, calls=[])
+    """`reply` is the text of every call, or a function (system, user) -> text. `error` makes every call fail.
+    `calls` records (system, user) and `settings` the Settings of each call."""
+    state = SimpleNamespace(reply=reply, error=None, calls=[], settings=[])
 
     def complete(system, user, settings=None):
         state.calls.append((system, user))
+        state.settings.append(settings)
         if state.error:
             raise llm.LLMError(state.error)
-        return state.reply, {"prompt_tokens": 10, "completion_tokens": 5}
+        text = state.reply(system, user) if callable(state.reply) else state.reply
+        return text, {"prompt_tokens": 10, "completion_tokens": 5}
 
     monkeypatch.setattr(llm, "complete", complete)
     return state
@@ -51,6 +61,7 @@ def rag_settings(settings, **updates):
         "llm_model": "fake-llm",
         "llm_base_url": "http://llm.invalid",
         "llm_extra_body": {},
+        "llm_rewrite_extra_body": {},
     }
     return settings.model_copy(update={**defaults, **updates})
 

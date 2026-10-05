@@ -50,6 +50,8 @@ class QueryLog(BaseModel):
     prompt_tokens: int | None
     completion_tokens: int | None
     error: str | None
+    rewritten_question: str | None
+    history_turns: int
     created_at: datetime
 
 
@@ -90,7 +92,8 @@ def list_queries(
 ):
     return conn.execute(
         "SELECT q.id, q.kb_id, q.user_id, u.email AS user_email, q.question, q.answer, q.insufficient, q.retrieved, "
-        "q.model, q.latency_ms, q.prompt_tokens, q.completion_tokens, q.error, q.created_at "
+        "q.model, q.latency_ms, q.prompt_tokens, q.completion_tokens, q.error, q.rewritten_question, q.history_turns, "
+        "q.created_at "
         "FROM query_logs q LEFT JOIN users u ON u.id = q.user_id "
         "WHERE q.kb_id = %(kb)s AND (%(ins)s::boolean IS NULL OR q.insufficient = %(ins)s) "
         "ORDER BY q.id DESC LIMIT %(limit)s OFFSET %(offset)s",

@@ -63,8 +63,9 @@ def kb_scope(conn: Connection, kb_id: UUID | str) -> Iterator[Connection]:
 
 # The one policy document_chunks may have, as Postgres deparses it. Compared without whitespace, parentheses and case.
 POLICY_EXPR = "kb_id = (NULLIF(current_setting('app.kb_id'::text, true), ''::text))::uuid"
-# The newest migration's columns: an api or worker that starts before `app.cli migrate` finished must not serve.
-LATEST_MIGRATION_COLUMNS = ("embedding_fingerprint", "embedding_query_canary")
+# The newest migration's table and columns: an api or worker that starts before `app.cli migrate` finished must not
+# serve. Migrations apply in order, so this also proves the older ones ran.
+LATEST_MIGRATION_TABLE, LATEST_MIGRATION_COLUMNS = "query_logs", ("rewritten_question", "history_turns")
 
 
 def _norm(expr: str | None) -> str:
@@ -111,9 +112,8 @@ def check_db(conn: Connection, embedding_dim: int) -> None:
                 "add a migration or recreate the database volume."
             )
         cur.execute(
-            "SELECT count(*) FROM pg_attribute WHERE attrelid = 'knowledge_bases'::regclass AND NOT attisdropped "
-            "AND attname = ANY(%s)",
-            [list(LATEST_MIGRATION_COLUMNS)],
+            "SELECT count(*) FROM pg_attribute WHERE attrelid = %s::regclass AND NOT attisdropped AND attname = ANY(%s)",
+            [LATEST_MIGRATION_TABLE, list(LATEST_MIGRATION_COLUMNS)],
         )
         if cur.fetchone()[0] != len(LATEST_MIGRATION_COLUMNS):  # type: ignore[index]
             raise StartupCheckError("The database schema is behind the code; run `python -m app.cli migrate` first.")

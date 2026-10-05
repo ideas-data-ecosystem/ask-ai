@@ -1,13 +1,14 @@
-"""POST /kbs/{kb_id}/ask: single-turn question answering over one knowledge base."""
+"""POST /kbs/{kb_id}/ask: question answering over one knowledge base, with optional earlier turns as context."""
 
 import threading
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app import rag
 from app.auth import COOKIE_NAME, authenticate, authorize_kb
@@ -40,8 +41,22 @@ def _ask_slot(user_id: UUID) -> Iterator[None]:
                 del _in_flight[user_id]
 
 
+def _clean(text: str) -> str:
+    """Trimmed, without NUL characters: Postgres text cannot store them (the query log write would fail)."""
+    return text.replace("\x00", "").strip()
+
+
+class HistoryTurn(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a typo such as "answr" is a 422, not a silently empty answer
+
+    question: str
+    answer: str
+
+
 class AskIn(BaseModel):
     question: str
+    # Earlier turns, the most recent last. Absent, null or [] is a single-turn question.
+    history: Annotated[list[HistoryTurn], Field(max_length=rag.MAX_HISTORY_TURNS)] | None = None
 
 
 class CitationOut(BaseModel):
@@ -70,8 +85,15 @@ def ask(kb_id: UUID, body: AskIn, request: Request, settings: Settings = Depends
     with pool.connection() as conn:
         user = authenticate(conn, request.cookies.get(COOKIE_NAME))
         authorize_kb(conn, user, kb_id, "viewer")
-    question = body.question.strip()
+    question = _clean(body.question)
     if not 1 <= len(question) <= settings.max_question_chars:
         raise HTTPException(422, f"The question must be between 1 and {settings.max_question_chars} characters")
+    # Over-long turns are cut, not refused: an answer this server wrote can be longer than the cap.
+    history = [
+        (_clean(t.question)[: settings.max_question_chars], _clean(t.answer)[: rag.HISTORY_ANSWER_CHARS])
+        for t in body.history or []
+    ]
+    if any(not q for q, _ in history):
+        raise HTTPException(422, "Every history turn needs a non-empty question")
     with _ask_slot(user.id):
-        return rag.ask(pool, settings, kb_id, user.id, question)
+        return rag.ask(pool, settings, kb_id, user.id, question, history)

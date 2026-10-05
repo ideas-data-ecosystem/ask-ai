@@ -151,7 +151,13 @@ const tokens = (q: QueryLog) => (q.prompt_tokens ?? 0) + (q.completion_tokens ??
           <tr v-for="q in queries" :key="q.id">
             <td data-label="Waktu">{{ fmtDate(q.created_at) }}</td>
             <td data-label="Pengguna">{{ q.user_email ?? "-" }}</td>
-            <td data-label="Pertanyaan">{{ q.question }}</td>
+            <td data-label="Pertanyaan">
+              <div>
+                {{ q.question }}
+                <div v-if="q.history_turns" class="muted small">Lanjutan dari {{ q.history_turns }} giliran sebelumnya</div>
+                <div v-if="q.rewritten_question" class="muted small">Dicari sebagai: {{ q.rewritten_question }}</div>
+              </div>
+            </td>
             <td data-label="Hasil">
               <span v-if="q.error" class="badge bad"><span aria-hidden="true">✕</span> Galat</span>
               <span v-else-if="q.insufficient" class="badge warn"><span aria-hidden="true">ⓘ</span> Tidak cukup</span>
